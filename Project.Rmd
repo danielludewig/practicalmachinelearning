@@ -1,0 +1,218 @@
+---
+title: "Machine Learning and Wearable Fitness Trackers"
+author: "Daniel Ludewig"
+date: "16 September 2017"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+## Introduction
+
+Wearable fitness trackers have been increasingly popular in recent years. Brands such as *FitBit* and *Jawbone Up* allow the customer to monitor activity and health effortlessly with unprecedented accuracy. The increased popularity of these products have has given rise to the a new research area known as **Human Activity Recognition** or **HAR**, as the devices allow for the inexpensive collection of a large amount of data. 
+
+The concept behind **HAR** is to identify movements of an individual wearing a device by using a reference data set to train the software. The applications for such technology is broad, ranging from assisting in the development of weight loss and fitness programs to tracking the welfare of the elderly and at risk groups. The purpose of this analysis is to build a machine learning algorithm capable of correctly predicting a specific action. Data was collected from 6 participants, who each performed repetitions of a bicep curl using 5 different forms, recorded as Class A to Class E. Class A represents the correct form for the exercise, while the other 4 classes represent common mistakes. 
+
+The training set of data can be found at [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). The data used to test the model can be found [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv). In this case, the test data is examinable, and does not reference which movement was used to produce the data. Predictions of this data set are submitted for assessment. 
+
+The source of this data was [this website](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har), which sites a 2013 paper called [Qualitative Activity Recognition of Weight Lifting Exercises](http://web.archive.org/web/20170809020213/http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf). 
+
+
+## Reading in the data and basic exploration. 
+
+The first set of the analysis is to load all required packages, and read in both the training and test data sets. 
+
+```{r download, echo=TRUE, cache=TRUE}
+
+library(doMC)
+library(splines)
+library(rpart)
+library(gbm)
+library(survival)
+library(lattice)
+library(ggplot2)
+library(randomForest)
+library(caret)
+
+training <- read.csv("pml-training.csv", header = TRUE)
+
+testing <- read.csv("pml-testing.csv", header = TRUE)
+
+
+```
+
+Once the data was read in, the training data set was split into 2 partitions: 70% of the data set was used train the model, and 30% to test the model. 
+
+```{r partition, echo=TRUE, cache=TRUE}
+
+set.seed(160917)
+
+inTrain <- createDataPartition(training$classe, p=0.7, list=FALSE)
+
+model_training <- training[inTrain, ]
+
+model_testing <- training[-inTrain, ]
+```
+
+Once the partitions were created, the *model_training* set examined. 
+
+```{r dim, echo=TRUE, cache=TRUE}
+
+dim(model_training)
+```
+
+As you can see, the data set is large, and has 160 variables. This needs to be considered, as not all of these variables will be suitable predictors for the model, and will only increase the time taken to run an algorithm. To get an idea of what each variable may contain and what may be useful, the first and last 10 variable names were looked at.
+
+```{r names, echo=TRUE, cache=TRUE}
+
+head(names(model_training), 10)
+tail(names(model_training), 10)
+```
+
+For instance, variable *X* and *user_name* will not be useful to the model, as they only represent a count of the data points and the the name of the subject. These should be removed from the set to make the data more manageable. 
+
+The prevalence of missing data was also looked at during this exploration. 
+
+```{r NAs, echo=TRUE, cache=TRUE}
+
+table(is.na(model_training))
+```
+
+As displayed, some variables are missing significant amounts of data, and may impede the algorithm. 
+
+## Cleaning the data.
+
+Given that there are 160 possible predictors in the data set, a choice was made to only use variable where data was complete, and remove all variables that contained *NAs*. If the model was not performing as well, then this set would have been revisited and another solutions around the problem attempted, such as imputing. The first 2 columns where then also removed, because as previously discussed, there was no analytical benefit of using them. 
+
+Near-zero variance predictors were also identified and removed from the data set. As above, this was completed because of the number of predictors is quite large, and variables that display little variation from class to class will not be useful in prediction. 
+
+
+```{r reduce, echo=TRUE, cache=TRUE}
+
+set.seed(160917)
+
+list<- c()
+for(i in 1:length(names(model_training))){
+      
+      t <- table(is.na(model_training[,i]))
+      
+      if(is.na(t[2])==TRUE){
+            
+            list<- c(list, names(model_training[i]))
+            
+            }
+      
+}
+
+training_names <- names(model_training)
+
+reduced_model_training <- model_training[,c(match(list, training_names))]
+
+reduced_model_training <- reduced_model_training[,3:93]
+
+nzv_predictors <- nearZeroVar(reduced_model_training, saveMetrics = TRUE)
+
+nzv<- nzv_predictors$nzv
+
+cleanTraining <- reduced_model_training[,nzv==FALSE]
+
+cleanModelTesting <- model_testing[,
+                  c(match(names(cleanTraining), names(model_testing)))]
+
+cleanTesting <- testing[,
+                  c(match(names(cleanTraining),
+names(model_testing)))]
+```
+
+The model testing data set and the examinable test data set were reduced to the same predictors as the test data set.The dimensions of the 3 new data sets were then looked at. 
+
+```{r new_dim, echo=TRUE, cache=TRUE}
+dim(cleanTraining)
+dim(cleanModelTesting)
+dim(cleanTesting)
+```
+
+## Fitting a Random Forest Model. 
+
+The first model type used in this analysis was a random forest model. It was first attempted using the default settings in the caret package, but it was proving to be quite time consuming. Therefore a decision was made to change the training control from the *bootstrap* default to a *5-fold cross validation*, in order to shorten the model fit time. A repeated cross validation was also considered, but the computational demands were too high resulting in a long model fit time, and therefore was not used. 
+
+Parallel processing was also utilized to speed up the process. 
+
+``` {r rf_model, echo=TRUE, cache=TRUE}
+
+set.seed(160917)
+
+registerDoMC(cores=2)
+
+validation <- trainControl(method = "cv", number = 5)
+
+model_rf <- train(classe ~. , data=cleanTraining, method = "rf", 
+                  trControl = validation)
+            
+predict_rf <- predict(model_rf, newdata = cleanModelTesting)
+
+matrix_rf <- confusionMatrix(predict_rf, cleanModelTesting$classe)
+
+matrix_rf
+```
+
+As displayed above, the accuracy of this model is quite high, at `r matrix_rf$overall[1]`. 
+
+```{r plot, echo=TRUE, cache=TRUE}
+
+model_rf$finalModel
+
+plot(model_rf)
+
+```
+
+These summary shows that the out-of-bag error rate is as low as 0.09%, and the accuracy is at it's highest at 38 variable being tried at each split. 
+
+## Fitting a Generalized Boosted Model. 
+
+The second model that was looked at was the *gbm* model type. Default settings were used on this attempt. 
+
+```{r gbm_model, echo=TRUE, cache=TRUE}
+
+set.seed(160917)
+
+model_gbm <- train(classe ~. , data=cleanTraining, method = "gbm")
+
+predict_gbm <- predict(model_gbm, newdata = cleanModelTesting)
+
+matrix_gbm <- confusionMatrix(predict_gbm, cleanModelTesting$classe)
+
+matrix_gbm
+```
+
+As displayed above, the accuracy of this model is still quite high at `r matrix_gbm$overall[1]`, but does not perform as well as the random forest model. 
+
+### Fitting a decision tree model using *rpart*. 
+
+The decision tree was the third model considered in this analysis. Default settings were used. 
+
+```{r rpart_model, echo=TRUE, cache=TRUE}
+
+set.seed(160917)
+
+model_rpart <- train(classe ~. , data=cleanTraining, method = "rpart")
+
+predict_rpart <- predict(model_rpart, newdata = cleanModelTesting)
+
+matrix_rpart <- confusionMatrix(predict_rpart, cleanModelTesting$classe)
+
+matrix_rpart
+```
+
+This method doesn't perform nearly as well as the other two methods, so it was not explored to the same extent. 
+
+## Conclusion
+
+As it performed with the highest accuracy, the random forest model was used to predict the examinable test data set. 
+
+```{r final_predictions, echo=TRUE, cache=TRUE}
+
+final_predictions <- predict(model_rf, newdata=cleanTesting)
+
+data.frame(Problem_ID = 1:20, Prediction = final_predictions)
+```
